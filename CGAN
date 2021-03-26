@@ -1,0 +1,188 @@
+import numpy as np
+from sklearn.datasets import fetch_california_housing
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import StandardScaler
+import keras
+from keras import Input, Model
+from keras.layers import Dense, LeakyReLU, concatenate
+from keras.optimizers import Adam, SGD
+
+
+
+housing = fetch_california_housing()
+
+X_train_full, X_test, y_train_full, y_test = train_test_split(housing.data, housing.target, random_state=1985)
+X_train, X_valid, y_train, y_valid = train_test_split(X_train_full, y_train_full, random_state=1985)
+
+
+
+scaler = StandardScaler()
+X_train = scaler.fit_transform(X_train)
+X_valid = scaler.transform(X_valid)
+X_test = scaler.transform(X_test)
+
+def build_generator():
+    seed = 1985
+    random_normal = keras.initializers.RandomNormal(seed=seed)
+    activation = "elu"
+    kerner_initializer = keras.initializers.he_normal(seed=seed)
+    x = Input(shape=(8,), dtype='float')
+    x_output = Dense(100, activation=activation, kernel_initializer=kerner_initializer)(x)
+
+    noise = Input(shape=(1,))
+    noise_output = Dense(100, activation=activation, kernel_initializer=kerner_initializer)(noise)
+
+    concat = concatenate([x_output, noise_output])
+
+    output = Dense(50, activation=activation, kernel_initializer=kerner_initializer)(concat)
+    output = Dense(50, activation=activation, kernel_initializer=kerner_initializer)(output)
+    output = Dense(50, activation=activation, kernel_initializer=kerner_initializer)(output)
+    output = Dense(50, activation=activation, kernel_initializer=kerner_initializer)(output)
+    output = Dense(50, activation=activation, kernel_initializer=kerner_initializer)(output)
+    output = Dense(1, activation="linear", kernel_initializer=random_normal)(output)
+
+    model = Model(inputs=[noise, x], outputs=output)
+    return model
+
+def build_discriminator():
+    seed = 1985
+    random_uniform = keras.initializers.RandomUniform(seed=seed)
+    activation = "elu"
+    kerner_initializer = keras.initializers.he_normal(seed=seed)
+    x = Input(shape=(8,), dtype='float')
+    x_output = Dense(100, activation=activation, kernel_initializer=kerner_initializer)(x)
+
+    label = Input(shape=(1,))
+    label_output = Dense(100, activation=activation, kernel_initializer=kerner_initializer)(label)
+
+    concat = concatenate([x_output, label_output])
+    concat = Dense(50, activation=activation, kernel_initializer=kerner_initializer)(concat)
+    concat = Dense(50, activation=activation, kernel_initializer=kerner_initializer)(concat)
+    concat = Dense(50, activation=activation, kernel_initializer=kerner_initializer)(concat)
+    concat = Dense(50, activation=activation, kernel_initializer=kerner_initializer)(concat)
+    validity = Dense(1, activation="sigmoid", kernel_initializer=random_uniform)(concat)
+
+    model = Model(inputs=[x, label], outputs=validity)
+    return model
+
+
+class CGAN():
+    def __init__(self):
+      self.optimizer_gen = Adam(lr=0.0001, decay=0)
+      self.optimizer_disc = Adam(lr=0.001, decay=0)
+      self.activation = "elu"
+      self.seed = 1985
+      self.x_input_size = 8
+      self.y_input_size = 1
+      self.z_input_size = 1
+      self.discriminator = build_discriminator()
+      self.discriminator.compile(
+          loss=['binary_crossentropy'],
+          optimizer=self.optimizer_disc,
+          metrics=['accuracy'])
+      self.generator = build_generator()
+      noise = Input(shape=(1,))
+      x = Input(shape=(8,))
+      label = self.generator([noise, x])
+      # For the combined model we will only train the generator
+      self.discriminator.trainable = False
+      validity = self.discriminator([x, label])
+      self.combined = Model([noise, x], validity)
+      self.combined.compile(
+          loss=['binary_crossentropy'],
+          optimizer=self.optimizer_gen)
+    
+    def train(self, xtrain, ytrain, epochs, batch_size=128, verbose=True):
+      # Adversarial ground truths
+      valid = np.ones((batch_size, 1))
+      fake = np.zeros((batch_size, 1))
+
+      dLossErr = np.zeros([epochs, 1])
+      dLossReal = np.zeros([epochs, 1])
+      dLossFake = np.zeros([epochs, 1])
+      gLossErr = np.zeros([epochs, 1])
+      genPred = np.zeros([epochs, 1])
+      genReal = np.zeros([epochs, 1])
+      for epoch in range(epochs):
+        for batch_idx in range(int(xtrain.shape[0] // batch_size)):
+          # ---------------------
+          #  Train Discriminator
+          # ---------------------
+          # Select a random half batch of images
+          idx = np.random.randint(0, xtrain.shape[0], batch_size)
+          x, true_labels = xtrain[idx], ytrain[idx]
+          # Sample noise as generator input
+          noise = np.random.normal(0, 1, (batch_size,1))
+          # Generate a half batch of new images
+          fake_labels = self.generator.predict([noise, x])
+          # Train the discriminator
+          d_loss_real = self.discriminator.train_on_batch([x, true_labels], valid)
+          d_loss_fake = self.discriminator.train_on_batch([x, fake_labels], fake)
+          d_loss = 0.5 * np.add(d_loss_real, d_loss_fake)
+
+          #  ---------------------
+          #  Train Generator
+          # ---------------------
+          # Condition on x
+          idx = np.random.randint(0, xtrain.shape[0], batch_size)
+          sample = xtrain[idx]
+          # Train the generator
+          g_loss = self.combined.train_on_batch([noise, sample], valid)
+
+        dLossErr[epoch] = d_loss[0]
+        dLossReal[epoch] = d_loss_real[0]
+        dLossFake[epoch] = d_loss_fake[0]
+        gLossErr[epoch] = g_loss
+        print(f"Epoch: {epoch} / dLoss: {d_loss[0]} / gLoss: {g_loss}")
+        ypred = self.predict(xtrain)
+        genPred[epoch] = np.average(ypred)
+        genReal[epoch] = np.average(ytrain)
+      return dLossErr, dLossReal, dLossFake, gLossErr, genPred, genReal
+    def predict(self, xtest):
+      noise = np.random.normal(0, 1, (xtest.shape[0], self.z_input_size))
+      ypred = self.generator.predict([noise, xtest])
+      return ypred
+
+    def sample(self, xtest, n_samples):
+      y_samples_gan = self.predict(xtest)
+      for i in range(n_samples - 1):
+        ypred_gan = self.predict(xtest)
+        y_samples_gan = np.hstack([y_samples_gan, ypred_gan])
+      median = []
+      mean = []
+      for j in range(y_samples_gan.shape[0]):
+        median.append(np.median(y_samples_gan[j, :]))
+        mean.append(np.mean(y_samples_gan[j, :]))
+
+      return np.array(mean).reshape(-1, 1), np.array(median).reshape(-1, 1), y_samples_gan
+      
+
+
+cgan = CGAN()
+history = cgan.train(X_train, y_train,epochs=500,batch_size=128)
+                                                                                                                                                          
+ypred_gan_test = cgan.predict(X_test)
+
+import matplotlib.pyplot as plt
+DLossFake = history[0]
+plt.plot(DLossFake)
+plt.ylabel('Discriminator Loss Error')
+plt.show()
+
+import matplotlib.pyplot as plt
+#dLossErr, dLossReal, dLossFake, gLossErr, genPred, genReal
+GLossErr = history[3]
+plt.plot(GLossErr)
+plt.ylabel('Generator Loss Error')
+plt.show()
+
+#dLossErr, dLossReal, dLossFake, gLossErr, genPred, genReal
+GenPred = history[4]
+plt.plot(GenPred)
+plt.ylabel('Generator Predict')
+plt.show()
+
+GenReal = history[5]
+plt.plot(GenReal)
+plt.ylabel('Generator Real')
+plt.show()
